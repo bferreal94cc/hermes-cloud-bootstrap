@@ -7,6 +7,8 @@ COMPOSE="$ROOT/compose.yaml"
 START="$ROOT/scripts/start-stack.sh"
 VERIFY="$ROOT/scripts/verify.sh"
 STATUS="$ROOT/scripts/status.sh"
+GCE_STARTUP="$ROOT/gce-startup.sh"
+CLOUD_SHELL="$ROOT/cloud-shell-deploy.sh"
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -29,9 +31,20 @@ reject_text() {
   fi
 }
 
-for file in "$INSTALL" "$COMPOSE" "$START" "$VERIFY" "$STATUS"; do
+for file in "$INSTALL" "$COMPOSE" "$START" "$VERIFY" "$STATUS" "$GCE_STARTUP" "$CLOUD_SHELL"; do
   require_file "$file"
 done
+
+require_text "$GCE_STARTUP" 'HERMES_BOOTSTRAP_REF=1a0066cb0f6470becbf8796b65a1a5d08ccd2bb6' \
+  'GCE startup must pin the validated bootstrap commit'
+require_text "$CLOUD_SHELL" 'e2-standard-2' \
+  'Cloud Shell deployment must enforce the 8-GB machine type'
+require_text "$CLOUD_SHELL" 'add-metadata' \
+  'Cloud Shell deployment must attach startup metadata'
+require_text "$CLOUD_SHELL" 'get-serial-port-output' \
+  'Cloud Shell deployment must retrieve the Tailscale authorization URL'
+require_text "$CLOUD_SHELL" 'status.sh --show-password' \
+  'Cloud Shell deployment must return only verified connection credentials'
 
 require_text "$INSTALL" 'source "$SCRIPT_DIR/versions.env"' \
   'installer must consume the reviewed source pins'
@@ -103,5 +116,5 @@ done
 reject_text "$INSTALL" "printf 'PASSWORD=%s" \
   'installer must not print the generated password'
 
-bash -n "$INSTALL" "$START" "$VERIFY" "$STATUS"
+bash -n "$INSTALL" "$START" "$VERIFY" "$STATUS" "$GCE_STARTUP" "$CLOUD_SHELL"
 printf 'PASS: deterministic installer contract\n'

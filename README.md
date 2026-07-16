@@ -50,6 +50,17 @@ checks and the iPhone successfully connects.
 
 ## Install
 
+For the prepared Google Cloud project, open the guided Cloud Shell handoff:
+
+[Open the Hermes deployment in Google Cloud Shell](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/bferreal94cc/hermes-cloud-bootstrap&cloudshell_git_branch=main&cloudshell_workspace=.&cloudshell_tutorial=docs/cloud-shell-tutorial.md&show=terminal)
+
+Cloud Shell asks for Google authorization, then the tutorial provides the one
+deployment command. The script attaches the pinned startup metadata, restarts
+the VM, waits for Tailscale approval, and prints the verified URL/password.
+
+For an instance-creation API that supports startup metadata directly, use the
+script below.
+
 Run the installer from a pinned bootstrap commit in instance startup metadata:
 
 ```bash
