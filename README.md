@@ -22,15 +22,17 @@ verification gate proves both deployed SHAs before writing a success status.
 ## Target VM
 
 - Google Compute Engine, not App Engine
-- Debian 12
+- Debian 11 host (the Compute connector image); the WebUI runs in the
+  upstream Python 3.12 container
 - `e2-standard-2` (2 vCPU, 8 GB RAM)
 - No public ingress rule for port `8787`
 - Docker Engine and Compose from Docker's official Debian repository
 - Tailscale from its official Linux installer, with a pinned official-image
   fallback for networks where `pkgs.tailscale.com` returns a gateway error
 
-The old VM should remain available until this parallel replacement passes all
-checks and the iPhone successfully connects.
+The pre-rebuild GitHub state remains available on the dated backup branches.
+The replacement VM must pass all checks before its URL and password are used in
+Hermex.
 
 ## What the installer does
 
