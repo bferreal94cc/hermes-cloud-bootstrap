@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT="${1:-gcp-hermes-bootstrap.sh}"
+SCRIPT="${1:-install.sh}"
 
 assert_contains() {
   local pattern="$1" message="$2"
@@ -49,6 +49,10 @@ assert_not_contains \
 assert_contains \
   "'Type=simple'" \
   'The foreground Tailscale daemon must use a non-blocking systemd service type'
+
+assert_not_contains \
+  "'Type=notify'" \
+  'The container-extracted Tailscale daemon must not leave systemd activating forever'
 
 assert_contains \
   '/etc/apt/sources.list.d/tailscale.list.disabled' \
