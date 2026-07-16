@@ -7,6 +7,15 @@ WEBUI_DIR="/home/hermes/hermes-webui"
 PASSWORD=""
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Earlier failed package installs can leave this source enabled. The VM can
+# reach GitHub and PyPI, but pkgs.tailscale.com returns 504 from this network;
+# disable only that stale source before apt refreshes every configured repo.
+if [ -f /etc/apt/sources.list.d/tailscale.list ]; then
+  mv /etc/apt/sources.list.d/tailscale.list \
+    /etc/apt/sources.list.d/tailscale.list.disabled
+fi
+
 apt-get update
 apt-get install -y ca-certificates curl git jq openssl python3 python3-pip python3-venv
 
@@ -50,7 +59,7 @@ if ! command -v tailscale >/dev/null 2>&1; then
     'After=network-pre.target' \
     '' \
     '[Service]' \
-    'Type=notify' \
+    'Type=simple' \
     'RuntimeDirectory=tailscale' \
     'RuntimeDirectoryMode=0755' \
     'ExecStart=/usr/local/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock' \
@@ -105,10 +114,17 @@ else
   fi
 fi
 
+if [ ! -x "$HERMES_HOME/hermes-agent/venv/bin/python" ]; then
+  printf 'Hermes managed Python 3.11 was not found at %s\n' \
+    "$HERMES_HOME/hermes-agent/venv/bin/python"
+  exit 1
+fi
+
 install -o "$HERMES_USER" -g "$HERMES_USER" -m 600 /dev/null "$WEBUI_DIR/.env"
 printf '%s\n' \
   "HERMES_HOME=$HERMES_HOME" \
   "HERMES_WEBUI_AGENT_DIR=$HERMES_HOME/hermes-agent" \
+  "HERMES_WEBUI_PYTHON=$HERMES_HOME/hermes-agent/venv/bin/python" \
   "HERMES_WEBUI_STATE_DIR=$HERMES_HOME/webui" \
   "HERMES_WEBUI_DEFAULT_WORKSPACE=/home/hermes/workspace" \
   "HERMES_WEBUI_HOST=127.0.0.1" \
@@ -128,8 +144,7 @@ install -m 644 /dev/null /etc/systemd/system/hermes-webui.service
 printf '%s\n' \
   '[Unit]' \
   'Description=Hermes Web UI' \
-  'Wants=network-online.target' \
-  'After=network-online.target tailscaled.service' \
+  'After=network.target' \
   '' \
   '[Service]' \
   'Type=simple' \
