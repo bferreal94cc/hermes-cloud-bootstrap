@@ -26,8 +26,45 @@ else
 fi
 
 if ! command -v tailscale >/dev/null 2>&1; then
-  curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors \
-    https://tailscale.com/install.sh | sh
+  if ! curl -fsSL --retry 3 --retry-delay 3 --retry-all-errors \
+    https://tailscale.com/install.sh | sh; then
+    printf 'Tailscale package host is unavailable; installing official v1.98.8 binaries from its container image.\n'
+    apt-get install -y docker.io
+    systemctl enable --now docker
+    TAILSCALE_IMAGE="docker.io/tailscale/tailscale:v1.98.8"
+    if ! docker pull "$TAILSCALE_IMAGE"; then
+      TAILSCALE_IMAGE="ghcr.io/tailscale/tailscale:v1.98.8"
+      docker pull "$TAILSCALE_IMAGE"
+    fi
+    TAILSCALE_CONTAINER="$(docker create "$TAILSCALE_IMAGE")"
+    docker cp "$TAILSCALE_CONTAINER:/usr/local/bin/tailscale" /usr/local/bin/tailscale
+    docker cp "$TAILSCALE_CONTAINER:/usr/local/bin/tailscaled" /usr/local/bin/tailscaled
+    docker rm "$TAILSCALE_CONTAINER"
+    chmod 0755 /usr/local/bin/tailscale /usr/local/bin/tailscaled
+    install -d -m 0755 /var/lib/tailscale
+
+    install -m 0644 /dev/null /etc/systemd/system/tailscaled.service
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=Tailscale node agent' \
+      'Documentation=https://tailscale.com/kb/' \
+      'Wants=network-pre.target' \
+      'After=network-pre.target' \
+      '' \
+      '[Service]' \
+      'Type=notify' \
+      'RuntimeDirectory=tailscale' \
+      'RuntimeDirectoryMode=0755' \
+      'ExecStart=/usr/local/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock' \
+      'Restart=on-failure' \
+      'RestartSec=5' \
+      '' \
+      '[Install]' \
+      'WantedBy=multi-user.target' \
+      > /etc/systemd/system/tailscaled.service
+    systemctl daemon-reload
+    systemctl disable --now docker || true
+  fi
 fi
 systemctl enable --now tailscaled
 
