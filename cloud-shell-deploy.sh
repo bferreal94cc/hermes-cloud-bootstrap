@@ -5,6 +5,7 @@ readonly PROJECT_ID="${PROJECT_ID:-chatgpt-agent-502515}"
 readonly INSTANCE_NAME="${INSTANCE_NAME:-hermes-agent-vm-v2}"
 readonly ZONE="${ZONE:-us-west1-b}"
 readonly STARTUP_WRAPPER_URL="https://raw.githubusercontent.com/bferreal94cc/hermes-cloud-bootstrap/main/gce-startup.sh"
+readonly RESULT_FILE="${RESULT_FILE:-${HOME}/hermes-connection.txt}"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -62,7 +63,7 @@ if [[ -z "$auth_url" ]]; then
 fi
 
 printf '\nOpen this URL and approve %s:\n%s\n\n' "$INSTANCE_NAME" "$auth_url"
-read -r -p 'After Tailscale says Success, return here and press Enter. '
+printf 'No terminal input is required. Approval is detected automatically.\n'
 
 printf 'Waiting for Docker build, health, and password-auth verification...\n'
 for _ in $(seq 1 120); do
@@ -70,7 +71,14 @@ for _ in $(seq 1 120); do
       --project="$PROJECT_ID" --zone="$ZONE" --quiet \
       --command='sudo /opt/hermes-stack/scripts/status.sh --show-password' \
       2>/dev/null)"; then
-    printf '\nHERMES_DEPLOYMENT_COMPLETE\n%s\n' "$result"
+    umask 077
+    {
+      printf 'HERMES_DEPLOYMENT_COMPLETE\n%s\n' "$result"
+    } > "$RESULT_FILE"
+    chmod 600 "$RESULT_FILE"
+    printf '\n'
+    cat "$RESULT_FILE"
+    printf 'Saved securely at %s\n' "$RESULT_FILE"
     exit 0
   fi
   sleep 15

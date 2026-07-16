@@ -45,6 +45,12 @@ require_text "$CLOUD_SHELL" 'get-serial-port-output' \
   'Cloud Shell deployment must retrieve the Tailscale authorization URL'
 require_text "$CLOUD_SHELL" 'status.sh --show-password' \
   'Cloud Shell deployment must return only verified connection credentials'
+require_text "$CLOUD_SHELL" 'hermes-connection.txt' \
+  'Cloud Shell deployment must persist the verified credentials for mobile recovery'
+require_text "$CLOUD_SHELL" 'chmod 600' \
+  'Cloud Shell deployment must protect the persisted credentials'
+reject_text "$CLOUD_SHELL" 'read -r -p' \
+  'Cloud Shell deployment must not pause for terminal input after Tailscale approval'
 
 require_text "$INSTALL" 'source "$SCRIPT_DIR/versions.env"' \
   'installer must consume the reviewed source pins'

@@ -58,7 +58,10 @@ For the prepared Google Cloud project, open the guided Cloud Shell handoff:
 
 Cloud Shell asks for Google authorization, then the tutorial provides the one
 deployment command. The script attaches the pinned startup metadata, restarts
-the VM, waits for Tailscale approval, and prints the verified URL/password.
+the VM, waits for Tailscale approval, and prints the verified URL/password. It
+does not pause for terminal input after approval and securely saves the final
+credentials at `~/hermes-connection.txt`, so an iPhone browser switch cannot
+lose them.
 
 For an instance-creation API that supports startup metadata directly, use the
 script below.

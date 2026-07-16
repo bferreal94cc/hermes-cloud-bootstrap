@@ -20,8 +20,9 @@ VM, and waits for the Tailscale URL.
 ## Approve Tailscale
 
 Open the `https://login.tailscale.com/...` URL printed in the terminal and
-approve `hermes-agent-vm-v2`. Return to Cloud Shell and press Enter.
+approve `hermes-agent-vm-v2`. No terminal input is required after approval.
 
 The same script waits for the upstream Docker build and all health/auth checks.
 When it finishes, it prints exactly the `SERVER_URL` and `PASSWORD` to enter in
-Hermex.
+Hermex and saves them in `~/hermes-connection.txt`. The VM keeps installing if
+the iPhone disconnects from Cloud Shell.
