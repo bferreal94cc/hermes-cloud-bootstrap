@@ -1,0 +1,42 @@
+name: hermes-stack
+
+services:
+  hermes-webui:
+    build:
+      context: ${HERMES_WEBUI_SOURCE_DIR:?Hermes WebUI source is required}
+      args:
+        HERMES_VERSION: ${HERMES_WEBUI_REF:?Hermes WebUI ref is required}
+    container_name: hermes-webui
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+      - "${TAILSCALE_IP:?Tailscale IPv4 is required}:8787:8787"
+    volumes:
+      - ${HERMES_HOME_DIR:?Hermes home is required}:/home/hermeswebui/.hermes
+      - ${HERMES_AGENT_SOURCE_DIR:?Hermes Agent source is required}:/home/hermeswebui/.hermes/hermes-agent:ro
+      - ${HERMES_WORKSPACE_DIR:?Hermes workspace is required}:/workspace
+    environment:
+      HERMES_HOME: /home/hermeswebui/.hermes
+      HERMES_WEBUI_AGENT_DIR: /home/hermeswebui/.hermes/hermes-agent
+      HERMES_WEBUI_STATE_DIR: /home/hermeswebui/.hermes/webui
+      HERMES_WEBUI_DEFAULT_WORKSPACE: /workspace
+      HERMES_WEBUI_HOST: 0.0.0.0
+      HERMES_WEBUI_PORT: "8787"
+      HERMES_WEBUI_PASSWORD: ${HERMES_WEBUI_PASSWORD:?WebUI password is required}
+      HERMES_WEBUI_SECURE: "false"
+      HERMES_WEBUI_TRUST_FORWARDED_HOST: "true"
+      HERMES_WEBUI_TRUST_FORWARDED_PROTO: "true"
+      HERMES_SKIP_CHMOD: "1"
+      WANTED_UID: "1000"
+      WANTED_GID: "1000"
+    healthcheck:
+      test: ["CMD", "bash", "/app/scripts/lib/health_probe.sh", "localhost", "8787", "/health", "2"]
+      interval: 15s
+      timeout: 8s
+      start_period: 60s
+      retries: 20
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

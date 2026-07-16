@@ -1,0 +1,19 @@
+name: Validate bootstrap
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax and repository contract
+        run: |
+          bash tests/test_repository.sh
+          bash tests/test_install.sh
+          git diff --check

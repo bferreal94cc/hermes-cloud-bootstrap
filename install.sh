@@ -1,55 +1,134 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-HERMES_USER="hermes"
-HERMES_HOME="/home/hermes/.hermes"
-WEBUI_DIR="/home/hermes/hermes-webui"
-PASSWORD=""
+readonly BOOTSTRAP_REPOSITORY="bferreal94cc/hermes-cloud-bootstrap"
+readonly HERMES_STACK_ROOT="${HERMES_STACK_ROOT:-/opt/hermes-stack}"
+readonly HERMES_CONFIG_ROOT="${HERMES_CONFIG_ROOT:-/etc/hermes-stack}"
+readonly HERMES_STATE_ROOT="${HERMES_STATE_ROOT:-/var/lib/hermes-stack}"
+readonly HERMES_BOOTSTRAP_REF="${HERMES_BOOTSTRAP_REF:-main}"
+readonly TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-hermes-agent-vm-v2}"
+readonly ORIGINAL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 
+SCRIPT_DIR="$ORIGINAL_SCRIPT_DIR"
+TEMP_BOOTSTRAP_DIR=""
 export DEBIAN_FRONTEND=noninteractive
 
-# Earlier failed package installs can leave this source enabled. The VM can
-# reach GitHub and PyPI, but pkgs.tailscale.com returns 504 from this network;
-# disable only that stale source before apt refreshes every configured repo.
-if [ -f /etc/apt/sources.list.d/tailscale.list ]; then
-  mv /etc/apt/sources.list.d/tailscale.list \
-    /etc/apt/sources.list.d/tailscale.list.disabled
-fi
+log() {
+  printf '[hermes-bootstrap] %s\n' "$*"
+}
 
-apt-get update
-apt-get install -y ca-certificates curl git jq openssl python3 python3-pip python3-venv
+die() {
+  printf '[hermes-bootstrap] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 
-if ! id -u "$HERMES_USER" >/dev/null 2>&1; then
-  useradd --create-home --shell /bin/bash "$HERMES_USER"
-fi
-
-install -d -o "$HERMES_USER" -g "$HERMES_USER" \
-  "$HERMES_HOME" \
-  "$HERMES_HOME/webui" \
-  "/home/hermes/workspace"
-
-if [ -s "$HERMES_HOME/webui-password.txt" ]; then
-  PASSWORD="$(head -n 1 "$HERMES_HOME/webui-password.txt")"
-else
-  PASSWORD="$(openssl rand -hex 24)"
-fi
-
-if ! command -v tailscale >/dev/null 2>&1; then
-  printf 'Installing official Tailscale v1.98.8 binaries from its container image.\n'
-  apt-get install -y docker.io
-  systemctl enable --now docker
-  TAILSCALE_IMAGE="docker.io/tailscale/tailscale:v1.98.8"
-  if ! docker pull "$TAILSCALE_IMAGE"; then
-    TAILSCALE_IMAGE="ghcr.io/tailscale/tailscale:v1.98.8"
-    docker pull "$TAILSCALE_IMAGE"
+cleanup() {
+  if [[ -n "$TEMP_BOOTSTRAP_DIR" && -d "$TEMP_BOOTSTRAP_DIR" ]]; then
+    rm -rf -- "$TEMP_BOOTSTRAP_DIR"
   fi
-  TAILSCALE_CONTAINER="$(docker create "$TAILSCALE_IMAGE")"
-  docker cp "$TAILSCALE_CONTAINER:/usr/local/bin/tailscale" /usr/local/bin/tailscale
-  docker cp "$TAILSCALE_CONTAINER:/usr/local/bin/tailscaled" /usr/local/bin/tailscaled
-  docker rm "$TAILSCALE_CONTAINER"
-  chmod 0755 /usr/local/bin/tailscale /usr/local/bin/tailscaled
-  install -d -m 0755 /var/lib/tailscale
+}
+trap cleanup EXIT
 
+if [[ "$(id -u)" -ne 0 ]]; then
+  die 'run this installer as root'
+fi
+
+download_bootstrap_file() {
+  local relative_path="$1" destination="$2"
+  local url="https://raw.githubusercontent.com/${BOOTSTRAP_REPOSITORY}/${HERMES_BOOTSTRAP_REF}/${relative_path}"
+  curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors \
+    --connect-timeout 20 --max-time 180 \
+    "$url" -o "$destination"
+}
+
+if [[ ! -f "$SCRIPT_DIR/versions.env" ]]; then
+  TEMP_BOOTSTRAP_DIR="$(mktemp -d /tmp/hermes-bootstrap.XXXXXX)"
+  SCRIPT_DIR="$TEMP_BOOTSTRAP_DIR"
+  download_bootstrap_file versions.env "$SCRIPT_DIR/versions.env"
+fi
+
+# shellcheck source=versions.env
+source "$SCRIPT_DIR/versions.env"
+
+for variable_name in HERMES_AGENT_REPO HERMES_AGENT_REF HERMES_WEBUI_REPO HERMES_WEBUI_REF TAILSCALE_VERSION; do
+  [[ -n "${!variable_name:-}" ]] || die "missing ${variable_name} in versions.env"
+done
+[[ "$HERMES_AGENT_REF" =~ ^[0-9a-f]{40}$ ]] || die 'Hermes Agent ref must be an exact commit SHA'
+[[ "$HERMES_WEBUI_REF" =~ ^[0-9a-f]{40}$ ]] || die 'Hermes WebUI ref must be an exact commit SHA'
+
+ensure_bootstrap_asset() {
+  local relative_path="$1"
+  if [[ ! -f "$SCRIPT_DIR/$relative_path" ]]; then
+    install -d -m 0755 "$(dirname "$SCRIPT_DIR/$relative_path")"
+    download_bootstrap_file "$relative_path" "$SCRIPT_DIR/$relative_path"
+  fi
+}
+
+for asset in compose.yaml scripts/start-stack.sh scripts/verify.sh scripts/status.sh; do
+  ensure_bootstrap_asset "$asset"
+done
+
+install_docker() {
+  log 'Installing Docker Engine from Docker’s official Debian repository.'
+  apt-get update
+  apt-get install -y ca-certificates curl git jq openssl gnupg
+
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors \
+    https://download.docker.com/linux/debian/gpg \
+    -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+
+  # shellcheck source=/dev/null
+  source /etc/os-release
+  [[ "${ID:-}" == "debian" ]] || die "this installer requires Debian; detected ${ID:-unknown}"
+  local architecture codename
+  architecture="$(dpkg --print-architecture)"
+  codename="${VERSION_CODENAME:-}"
+  [[ -n "$codename" ]] || die 'could not determine the Debian codename'
+
+  printf '%s\n' \
+    'Types: deb' \
+    'URIs: https://download.docker.com/linux/debian' \
+    "Suites: $codename" \
+    'Components: stable' \
+    "Architectures: $architecture" \
+    'Signed-By: /etc/apt/keyrings/docker.asc' \
+    > /etc/apt/sources.list.d/docker.sources
+
+  apt-get update
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker.service containerd.service
+  docker compose version >/dev/null
+}
+
+install_tailscale_binary_fallback() {
+  local image="docker.io/tailscale/tailscale:v${TAILSCALE_VERSION}"
+  local container_id=""
+
+  log "Official Tailscale package endpoint was unavailable; using official pinned container v${TAILSCALE_VERSION}."
+  docker pull "$image"
+  container_id="$(docker create "$image")"
+  trap '[[ -z "${container_id:-}" ]] || docker rm -f "$container_id" >/dev/null 2>&1 || true; cleanup' EXIT
+  docker cp "$container_id:/usr/local/bin/tailscale" /usr/local/bin/tailscale
+  docker cp "$container_id:/usr/local/bin/tailscaled" /usr/local/bin/tailscaled
+  docker rm "$container_id" >/dev/null
+  container_id=""
+  chmod 0755 /usr/local/bin/tailscale /usr/local/bin/tailscaled
+
+  # A failed package installer can leave a repository that makes every later
+  # apt update fail with the same gateway error. The pinned binary fallback is
+  # self-contained, so disable only those incomplete Tailscale source files.
+  for source_file in \
+      /etc/apt/sources.list.d/tailscale.list \
+      /etc/apt/sources.list.d/tailscale.sources; do
+    if [[ -f "$source_file" ]]; then
+      mv "$source_file" "${source_file}.disabled"
+    fi
+  done
+
+  install -d -m 0700 /var/lib/tailscale
+  install -d -m 0755 /run/tailscale
   install -m 0644 /dev/null /etc/systemd/system/tailscaled.service
   printf '%s\n' \
     '[Unit]' \
@@ -69,184 +148,158 @@ if ! command -v tailscale >/dev/null 2>&1; then
     '[Install]' \
     'WantedBy=multi-user.target' \
     > /etc/systemd/system/tailscaled.service
+}
+
+install_tailscale() {
+  if command -v tailscale >/dev/null 2>&1 && command -v tailscaled >/dev/null 2>&1; then
+    log 'Tailscale binaries are already installed.'
+  else
+    log 'Installing Tailscale with its official Linux installer.'
+    local installer=""
+    installer="$(mktemp /tmp/tailscale-install.XXXXXX)"
+    if curl -fsSL --retry 5 --retry-delay 6 --retry-all-errors \
+        --connect-timeout 20 --max-time 180 \
+        https://tailscale.com/install.sh -o "$installer" \
+        && sh "$installer"; then
+      rm -f -- "$installer"
+    else
+      rm -f -- "$installer"
+      install_tailscale_binary_fallback
+    fi
+  fi
+
   systemctl daemon-reload
-  systemctl disable --now docker || true
-fi
-systemctl enable --now tailscaled
+  systemctl enable --now tailscaled.service
+}
 
-if [ ! -f "$HERMES_HOME/hermes-agent/run_agent.py" ]; then
-  HERMES_INSTALLED=0
-  for ATTEMPT in $(seq 1 6); do
-    if runuser -u "$HERMES_USER" -- env \
-      HOME=/home/hermes \
-      HERMES_HOME="$HERMES_HOME" \
-      bash -lc 'curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --non-interactive --skip-browser'; then
-      HERMES_INSTALLED=1
-      break
+install_pinned_checkout() {
+  local repository="$1" ref="$2" destination="$3" label="$4"
+  local staging="${destination}.new"
+  local previous="${destination}.previous"
+
+  case "$destination" in
+    "$HERMES_STACK_ROOT"/sources/*) ;;
+    *) die "refusing unmanaged source destination: $destination" ;;
+  esac
+
+  rm -rf -- "$staging"
+  git clone --filter=blob:none --no-checkout "$repository" "$staging"
+  (
+    cd "$staging"
+    if [[ "$label" == 'Hermes Agent' ]]; then
+      git checkout --detach "$HERMES_AGENT_REF"
+    else
+      git checkout --detach "$HERMES_WEBUI_REF"
     fi
-    printf 'Hermes download attempt %s failed; retrying in 10 seconds.\n' "$ATTEMPT"
-    sleep 10
-  done
-  if [ "$HERMES_INSTALLED" -ne 1 ]; then
-    printf 'Hermes installation failed after six attempts.\n'
-    exit 1
+    [[ "$(git rev-parse HEAD)" == "$ref" ]] || exit 1
+  ) || die "$label checkout did not resolve to $ref"
+
+  rm -rf -- "$previous"
+  if [[ -e "$destination" ]]; then
+    mv "$destination" "$previous"
   fi
-fi
+  mv "$staging" "$destination"
+  rm -rf -- "$previous"
+}
 
-if [ -d "$WEBUI_DIR/.git" ]; then
-  runuser -u "$HERMES_USER" -- env HOME=/home/hermes \
-    git -C "$WEBUI_DIR" pull --ff-only
-else
-  WEBUI_CLONED=0
-  for ATTEMPT in $(seq 1 6); do
-    if runuser -u "$HERMES_USER" -- env HOME=/home/hermes GIT_TERMINAL_PROMPT=0 \
-      git clone --depth 1 https://github.com/nesquena/hermes-webui.git "$WEBUI_DIR"; then
-      WEBUI_CLONED=1
-      break
-    fi
-    rm -rf "$WEBUI_DIR"
-    printf 'WebUI download attempt %s failed; retrying in 10 seconds.\n' "$ATTEMPT"
-    sleep 10
-  done
-  if [ "$WEBUI_CLONED" -ne 1 ]; then
-    printf 'WebUI download failed after six attempts.\n'
-    exit 1
+install_stack_sources() {
+  log 'Installing reviewed Hermes sources at exact commits.'
+  install -d -m 0755 "$HERMES_STACK_ROOT/sources"
+  install_pinned_checkout "$HERMES_AGENT_REPO" "$HERMES_AGENT_REF" \
+    "$HERMES_STACK_ROOT/sources/hermes-agent" 'Hermes Agent'
+  install_pinned_checkout "$HERMES_WEBUI_REPO" "$HERMES_WEBUI_REF" \
+    "$HERMES_STACK_ROOT/sources/hermes-webui" 'Hermes WebUI'
+}
+
+install_stack_files() {
+  log 'Installing the Compose definition and lifecycle scripts.'
+  install -d -m 0755 "$HERMES_STACK_ROOT/scripts" "$HERMES_CONFIG_ROOT"
+  install -d -m 0750 "$HERMES_STATE_ROOT/hermes-home" "$HERMES_STATE_ROOT/workspace"
+  chown -R 1000:1000 "$HERMES_STATE_ROOT/hermes-home" "$HERMES_STATE_ROOT/workspace"
+
+  install -m 0644 "$SCRIPT_DIR/versions.env" "$HERMES_STACK_ROOT/versions.env"
+  install -m 0644 "$SCRIPT_DIR/compose.yaml" "$HERMES_STACK_ROOT/compose.yaml"
+  install -m 0755 "$SCRIPT_DIR/scripts/start-stack.sh" "$HERMES_STACK_ROOT/scripts/start-stack.sh"
+  install -m 0755 "$SCRIPT_DIR/scripts/verify.sh" "$HERMES_STACK_ROOT/scripts/verify.sh"
+  install -m 0755 "$SCRIPT_DIR/scripts/status.sh" "$HERMES_STACK_ROOT/scripts/status.sh"
+
+  local runtime_env="$HERMES_CONFIG_ROOT/runtime.env"
+  if [[ -f "$runtime_env" ]]; then
+    # shellcheck source=/dev/null
+    source "$runtime_env"
   fi
-fi
-
-if [ ! -x "$HERMES_HOME/hermes-agent/venv/bin/python" ]; then
-  printf 'Hermes managed Python 3.11 was not found at %s\n' \
-    "$HERMES_HOME/hermes-agent/venv/bin/python"
-  exit 1
-fi
-
-install -o "$HERMES_USER" -g "$HERMES_USER" -m 600 /dev/null "$WEBUI_DIR/.env"
-printf '%s\n' \
-  "HERMES_HOME=$HERMES_HOME" \
-  "HERMES_WEBUI_AGENT_DIR=$HERMES_HOME/hermes-agent" \
-  "HERMES_WEBUI_PYTHON=$HERMES_HOME/hermes-agent/venv/bin/python" \
-  "HERMES_WEBUI_STATE_DIR=$HERMES_HOME/webui" \
-  "HERMES_WEBUI_DEFAULT_WORKSPACE=/home/hermes/workspace" \
-  "HERMES_WEBUI_HOST=127.0.0.1" \
-  "HERMES_WEBUI_PORT=8787" \
-  "HERMES_WEBUI_PASSWORD=$PASSWORD" \
-  "HERMES_WEBUI_SECURE=true" \
-  "HERMES_WEBUI_TRUST_FORWARDED_HOST=true" \
-  "HERMES_WEBUI_TRUST_FORWARDED_PROTO=true" \
-  > "$WEBUI_DIR/.env"
-chown "$HERMES_USER:$HERMES_USER" "$WEBUI_DIR/.env"
-
-install -o "$HERMES_USER" -g "$HERMES_USER" -m 600 /dev/null "$HERMES_HOME/webui-password.txt"
-printf '%s\n' "$PASSWORD" > "$HERMES_HOME/webui-password.txt"
-chown "$HERMES_USER:$HERMES_USER" "$HERMES_HOME/webui-password.txt"
-
-install -m 644 /dev/null /etc/systemd/system/hermes-webui.service
-printf '%s\n' \
-  '[Unit]' \
-  'Description=Hermes Web UI' \
-  'After=network.target' \
-  '' \
-  '[Service]' \
-  'Type=simple' \
-  'User=hermes' \
-  'Group=hermes' \
-  'Environment=HOME=/home/hermes' \
-  'Environment=PATH=/home/hermes/.local/bin:/home/hermes/.hermes/bin:/usr/local/bin:/usr/bin:/bin' \
-  'WorkingDirectory=/home/hermes/hermes-webui' \
-  'ExecStart=/bin/bash /home/hermes/hermes-webui/start.sh --foreground' \
-  'Restart=on-failure' \
-  'RestartSec=5' \
-  'NoNewPrivileges=true' \
-  'PrivateTmp=true' \
-  'ProtectSystem=full' \
-  'ReadWritePaths=/home/hermes' \
-  'StandardOutput=journal' \
-  'StandardError=journal' \
-  '' \
-  '[Install]' \
-  'WantedBy=multi-user.target' \
-  > /etc/systemd/system/hermes-webui.service
-
-systemctl daemon-reload
-systemctl enable hermes-webui.service
-systemctl restart hermes-webui.service
-
-for _ in $(seq 1 90); do
-  if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
-    break
+  if [[ ! "${HERMES_WEBUI_PASSWORD:-}" =~ ^[0-9a-f]{64}$ ]]; then
+    HERMES_WEBUI_PASSWORD="$(openssl rand -hex 32)"
   fi
-  sleep 2
-done
+  umask 077
+  printf 'HERMES_WEBUI_PASSWORD=%s\n' "$HERMES_WEBUI_PASSWORD" > "$runtime_env"
+  chmod 0600 "$runtime_env"
+}
 
-if ! curl -fsS http://127.0.0.1:8787/health >/dev/null; then
-  journalctl -u hermes-webui.service -n 100 --no-pager
-  exit 1
-fi
+install_systemd_service() {
+  log 'Configuring reboot-safe Hermes stack startup.'
+  install -m 0644 /dev/null /etc/systemd/system/hermes-stack.service
+  printf '%s\n' \
+    '[Unit]' \
+    'Description=Hermes Agent WebUI stack' \
+    'Wants=network-online.target' \
+    'After=network-online.target docker.service tailscaled.service' \
+    'Requires=docker.service tailscaled.service' \
+    '' \
+    '[Service]' \
+    'Type=oneshot' \
+    'EnvironmentFile=/etc/hermes-stack/runtime.env' \
+    'ExecStart=/opt/hermes-stack/scripts/start-stack.sh' \
+    'ExecStop=/usr/bin/docker compose --env-file /etc/hermes-stack/compose.env -f /opt/hermes-stack/compose.yaml down' \
+    'RemainAfterExit=yes' \
+    'Restart=on-failure' \
+    'RestartSec=15' \
+    'TimeoutStartSec=1800' \
+    'TimeoutStopSec=120' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target' \
+    > /etc/systemd/system/hermes-stack.service
 
-WRONG_AUTH_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
-  -H 'Content-Type: application/json' \
-  -d '{"password":"this-is-not-the-generated-password"}' \
-  http://127.0.0.1:8787/api/auth/login)"
-if [ "$WRONG_AUTH_CODE" != "401" ] && [ "$WRONG_AUTH_CODE" != "403" ]; then
-  printf 'Password authentication check failed; refusing to expose the WebUI. HTTP %s\n' "$WRONG_AUTH_CODE"
-  exit 1
-fi
+  systemctl daemon-reload
+  systemctl enable hermes-stack.service
+}
 
-curl -fsS \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -nc --arg password "$PASSWORD" '{password:$password}')" \
-  http://127.0.0.1:8787/api/auth/login >/dev/null
-
-if [ "$(tailscale status --json 2>/dev/null | jq -r '.BackendState // empty')" != "Running" ]; then
-  printf '\nTailscale needs authorization. Open the URL printed below, approve this VM, then return here.\n\n'
-  tailscale up --hostname=hermes-agent-vm
-fi
-
-TAIL_IP="$(tailscale ip -4 | head -n 1)"
-DNS_NAME="$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
-SERVER_URL=""
-SERVE_ACTIVE=0
-
-if tailscale serve --bg 8787; then
-  SERVE_ACTIVE=1
-  SERVER_URL="https://$DNS_NAME"
-
-  # Add a tailnet-only HTTP listener so the requested tail-IP health check works.
-  tailscale serve --http=8787 --bg 8787 || true
-fi
-
-if [ "$SERVE_ACTIVE" -eq 0 ]; then
-  # Password authentication was configured and verified before this non-loopback bind.
-  sed -i 's/^HERMES_WEBUI_HOST=.*/HERMES_WEBUI_HOST=0.0.0.0/' "$WEBUI_DIR/.env"
-  sed -i 's/^HERMES_WEBUI_SECURE=.*/HERMES_WEBUI_SECURE=false/' "$WEBUI_DIR/.env"
-  systemctl restart hermes-webui.service
-  SERVER_URL="http://$TAIL_IP:8787"
-fi
-
-for _ in $(seq 1 30); do
-  if curl -fsS "http://$TAIL_IP:8787/health" >/dev/null; then
-    break
+request_tailscale_authorization() {
+  install -d -m 0700 "$HERMES_STATE_ROOT"
+  local auth_file="$HERMES_STATE_ROOT/tailscale-auth.txt"
+  local backend_state=""
+  backend_state="$(tailscale status --json 2>/dev/null | jq -r '.BackendState // empty' || true)"
+  if [[ "$backend_state" == 'Running' ]]; then
+    : > "$auth_file"
+    chmod 0600 "$auth_file"
+    return 0
   fi
-  sleep 2
-done
 
-if ! curl -fsS "http://$TAIL_IP:8787/health"; then
-  if [ "$SERVE_ACTIVE" -eq 1 ]; then
-    # Keep HTTPS Serve as the primary URL; this tailnet bind only satisfies direct IP health checks.
-    sed -i 's/^HERMES_WEBUI_HOST=.*/HERMES_WEBUI_HOST=0.0.0.0/' "$WEBUI_DIR/.env"
-    systemctl restart hermes-webui.service
-    sleep 3
+  log 'Tailscale needs one-time authorization.'
+  timeout 25 tailscale up --hostname="$TAILSCALE_HOSTNAME" > "$auth_file" 2>&1 || true
+  chmod 0600 "$auth_file"
+  local login_url=""
+  login_url="$(grep -Eo 'https://login\.tailscale\.com/[a-zA-Z0-9/?=_&.-]+' "$auth_file" | head -n 1 || true)"
+  if [[ -n "$login_url" ]]; then
+    printf '\nTAILSCALE_AUTH_URL=%s\n\n' "$login_url"
+  else
+    log "Authorization output is saved at $auth_file."
   fi
-fi
+}
 
-if ! curl -fsS "http://$TAIL_IP:8787/health"; then
-  journalctl -u hermes-webui.service -n 100 --no-pager
-  exit 1
-fi
+install_docker
+install_tailscale
+install_stack_sources
+install_stack_files
+install_systemd_service
+request_tailscale_authorization
 
-printf '\n\nHERMES_SETUP_COMPLETE\n'
-printf 'SERVER_URL=%s\n' "$SERVER_URL"
-printf 'TAILSCALE_IP=%s\n' "$TAIL_IP"
-printf 'PASSWORD=%s\n' "$PASSWORD"
-printf 'PASSWORD_FILE=%s\n' "$HERMES_HOME/webui-password.txt"
-printf 'SERVICE_STATUS=%s\n' "$(systemctl is-active hermes-webui.service)"
+# This is intentionally non-blocking: on a new node, systemd keeps retrying
+# until the owner approves the one-time Tailscale URL.
+systemctl start --no-block hermes-stack.service
+
+log 'Installation staged successfully.'
+log 'The current VM has not been modified or deleted by this repository.'
+log 'After Tailscale authorization, status is available with:'
+printf '  sudo %s/scripts/status.sh --show-password\n' "$HERMES_STACK_ROOT"
